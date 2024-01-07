@@ -2,7 +2,6 @@ use std::collections::HashMap;
 extern crate psd;
 
 use base64::{engine::general_purpose, Engine as _};
-use image::{ImageBuffer, Rgba};
 use psd::{Psd, PsdGroup, PsdLayer};
 
 enum PsdNodeType {
@@ -33,8 +32,6 @@ fn main() {
             return;
         }
     };
-
-    let group_visibility = decode_hex_to_visibility(&decoded_token);
 
     let psd_bytes = include_bytes!("../kz-wingrivals-chars-final.psd");
     let psd = Psd::from_bytes(psd_bytes).unwrap();
@@ -78,52 +75,77 @@ fn decode_hex_to_visibility(hex_str: &str) -> Vec<u8> {
 
 fn build_psd_tree(psd: &Psd) -> PsdNode {
     let groups = psd.groups();
+    let group_ids_in_order = psd.group_ids_in_order();
     let layers = psd.layers();
 
-    let mut group_nodes: HashMap<u32, PsdNode> = HashMap::new();
-    let mut root_children: Vec<PsdNode> = Vec::new();
-
-    // Initialize group nodes
-    for group in groups.values() {
-        group_nodes.insert(
-            group.id(),
-            PsdNode {
-                content: Some(PsdNodeType::Group(group.clone())),
-                children: vec![],
-            },
-        );
-    }
-
-    // Assign layers to groups or root
-    for layer in layers {
-        let node = PsdNode {
-            content: Some(PsdNodeType::Layer(layer.clone())),
-            children: vec![],
-        };
-
-        match layer.parent_id() {
-            Some(parent_id) => {
-                if let Some(parent_node) = group_nodes.get_mut(&parent_id) {
-                    parent_node.children.push(node);
-                }
-            }
-            None => root_children.push(node),
-        }
-    }
-
-    // Collect top-level groups
-    for node in group_nodes.into_values() {
-        if let Some(PsdNodeType::Group(group)) = &node.content {
-            if group.parent_id().is_none() {
-                root_children.push(node);
-            }
-        }
-    }
-
-    PsdNode {
+    let mut root_node = PsdNode {
         content: None, // None signifies the root node
-        children: root_children,
+        children: vec![],
+    };
+
+    // Helper function to recursively build a subtree for a group
+    fn build_group_subtree(psd: &Psd, group_id: u32) -> PsdNode {
+        let group = psd.groups().get(&group_id).unwrap();
+
+        let mut children = Vec::new();
+        for (sub_group_id, sub_group) in psd.groups() {
+            if sub_group.parent_id() == Some(group_id) {
+                children.push(build_group_subtree(psd, *sub_group_id));
+            }
+        }
+
+        for layer in psd.layers() {
+            if layer.parent_id() == Some(group_id) {
+                children.push(PsdNode {
+                    content: Some(PsdNodeType::Layer(layer.clone())),
+                    children: vec![],
+                });
+            }
+        }
+
+        PsdNode {
+            content: Some(PsdNodeType::Group(group.clone())),
+            children,
+        }
     }
+
+    // Add top-level groups in order
+    for group_id in group_ids_in_order {
+        if groups.get(group_id).unwrap().parent_id().is_none() {
+            root_node.children.push(build_group_subtree(psd, *group_id));
+        }
+    }
+
+    // Keep track of layers that have been added to groups
+    let mut added_layers = std::collections::HashSet::new();
+
+    // Add layers to their respective groups first
+    for (index, layer) in layers.iter().enumerate() {
+        if let Some(parent_id) = layer.parent_id() {
+            if groups.contains_key(&parent_id) {
+                // This layer is part of a group and will be added in the build_group_subtree function
+                added_layers.insert(format!(
+                    "{}-{:?}-{}",
+                    layer.name(),
+                    layer.parent_id(),
+                    index
+                ));
+            }
+        }
+    }
+
+    // Add remaining top-level layers to the root
+    for (index, layer) in layers.iter().enumerate() {
+        let layer_identifier = format!("{}-{:?}-{}", layer.name(), layer.parent_id(), index);
+        if !added_layers.contains(&layer_identifier) {
+            root_node.children.push(PsdNode {
+                content: Some(PsdNodeType::Layer(layer.clone())),
+                children: vec![],
+            });
+        }
+    }
+
+    root_node
 }
 
 fn traverse_psd_tree<'a>(node: &'a PsdNode, depth: usize, action: &NodeAction<'a>) {
