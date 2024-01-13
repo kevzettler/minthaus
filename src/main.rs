@@ -1,15 +1,13 @@
-use std::collections::HashMap;
 extern crate psd;
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use base64::{engine::general_purpose, Engine as _};
-use image::codecs::pnm::ArbitraryHeader;
 use psd::{NodeType, Psd, PsdGroup, PsdNode};
 
 fn main() {
     // Example: Encode a token
-    let token = "FFFF00000300030003"; // token corresponding to layers
+    let token = "FFFF000300030003"; // token corresponding to layers
     let encoded_token = general_purpose::URL_SAFE_NO_PAD.encode(token);
     println!("Encoded Token: {}", encoded_token);
 
@@ -87,6 +85,9 @@ fn main() {
             );
         }
     }
+
+    let token_permutations = generate_permutations(&top_level_groups);
+    println!("****token_permutations{:?}", token_permutations.len());
 }
 
 fn decode_hex_to_visibility(hex_str: &str) -> Vec<u8> {
@@ -94,4 +95,42 @@ fn decode_hex_to_visibility(hex_str: &str) -> Vec<u8> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).unwrap_or(0))
         .collect()
+}
+
+fn generate_permutations(top_level_groups: &Vec<Rc<RefCell<PsdNode>>>) -> Vec<String> {
+    // Gather the limits for each top-level group
+    let limits = top_level_groups
+        .iter()
+        .map(|group| group.borrow().children().len())
+        .collect::<Vec<_>>();
+
+    // Generate all permutations within these limits
+    let permutations = cartesian_product_with_limits(limits);
+
+    // Convert permutations to hex tokens
+    permutations
+        .iter()
+        .map(|perm| {
+            perm.iter()
+                .map(|&index| format!("{:02X}", index))
+                .collect::<String>()
+        })
+        .collect()
+}
+
+// Helper function to generate Cartesian product with limits
+fn cartesian_product_with_limits(limits: Vec<usize>) -> Vec<Vec<usize>> {
+    let mut result = vec![vec![]];
+    for &limit in &limits {
+        let mut temp = Vec::with_capacity(result.len() * limit);
+        for current in &result {
+            for i in 0..limit {
+                let mut next = current.clone();
+                next.push(i);
+                temp.push(next);
+            }
+        }
+        result = temp;
+    }
+    result
 }
