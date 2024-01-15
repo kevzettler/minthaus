@@ -24,6 +24,7 @@ fn main() {
 
     let psd_bytes = include_bytes!("../kz-wingrivals-chars-final.psd");
     let psd = Psd::from_bytes(psd_bytes).unwrap();
+    // pretty print PSD structure
     // psd.traverse(|node, depth| {
     //     let indent = " ".repeat(depth * 4); // 4 spaces per depth level
     //     if let Some(content) = &node.content() {
@@ -33,8 +34,6 @@ fn main() {
     //         }
     //     }
     // });
-
-    let top_level_groups = get_top_level_psd_groups(&psd);
 
     // // actually validates background group
     // let background_group = match root_node.children().last() {
@@ -55,32 +54,40 @@ fn main() {
     // };
 
     // get validation limits from group children lenth
-    let token_validation_limits: Vec<u8> = top_level_groups
-        .iter()
-        .map(|group| {
-            let len = group.borrow().children().len();
-            // Convert len to u8, handling potential overflow
-            len.try_into().unwrap_or(u8::MAX)
-        })
-        .collect();
+    let token_validation_limits = get_validation_limits(&psd);
 
     // decode token in to visibility array
     let group_visibility = decode_hex_to_visibility(&decoded_token);
 
-    // validate that the group_visibility values are less than equal token limits
-    for (index, visibility) in group_visibility.iter().enumerate() {
-        if visibility > &token_validation_limits[index] {
+    // validate that the group_visibility values are within token limits
+    for (index, &visibility) in group_visibility.iter().enumerate() {
+        let visibility_usize = visibility as usize; // Cast visibility to usize
+
+        if visibility_usize < token_validation_limits[index].0 {
             panic!(
-                "token value for {:?} - {:?} exceeds validation of {:?}",
-                index, visibility, &token_validation_limits[index]
+                "token value for {:?} - {:?} less than validation min of {:?}",
+                index, visibility, token_validation_limits[index].0
+            );
+        }
+
+        if visibility_usize > token_validation_limits[index].1 {
+            panic!(
+                "token value for {:?} - {:?} exceeds validation max of {:?}",
+                index, visibility, token_validation_limits[index].1
             );
         }
     }
 
-    output_image_from_visibility_index(&psd, &group_visibility);
+    let token_permutations = generate_permutations(&psd);
+    println!(
+        "***possible layer permutations{:?}",
+        token_permutations.len()
+    );
 
-    // let token_permutations = generate_permutations(&top_level_groups);
-    // println!("****token_permutations{:?}", token_permutations.len());
+    token_permutations.iter().for_each(|hex_token| {
+        let group_visibility = decode_hex_to_visibility(hex_token);
+        output_image_from_visibility_index(&psd, &group_visibility, hex_token.to_string());
+    });
 }
 
 fn get_top_level_psd_groups(psd: &Psd) -> Vec<Rc<RefCell<PsdNode>>> {
@@ -121,7 +128,7 @@ fn get_background_nodes(psd: &Psd) -> Vec<Rc<RefCell<PsdNode>>> {
     panic!("No _backgrounds group found or last root child is not _backgrounds group")
 }
 
-fn output_image_from_visibility_index(psd: &Psd, visibility_index: &[u8]) {
+fn output_image_from_visibility_index(psd: &Psd, visibility_index: &[u8], file_name: String) {
     let top_level_groups = get_top_level_psd_groups(psd);
     let background_nodes = get_background_nodes(psd);
     let visible_children = collect_visible_children(&top_level_groups, visibility_index);
@@ -157,7 +164,7 @@ fn output_image_from_visibility_index(psd: &Psd, visibility_index: &[u8]) {
     }
 
     let total_ids = get_layer_ids(&cloned_and_extended_visible_children);
-    flatten_layers_and_output_png(total_ids, psd);
+    flatten_layers_and_output_png(total_ids, psd, file_name);
 }
 
 fn decode_hex_to_visibility(hex_str: &str) -> Vec<u8> {
@@ -167,12 +174,41 @@ fn decode_hex_to_visibility(hex_str: &str) -> Vec<u8> {
         .collect()
 }
 
-fn generate_permutations(top_level_groups: &Vec<Rc<RefCell<PsdNode>>>) -> Vec<String> {
-    // Gather the limits for each top-level group
-    let limits = top_level_groups
+fn get_validation_limits(psd: &Psd) -> Vec<(usize, usize)> {
+    let top_level_groups = get_top_level_psd_groups(psd);
+    let token_validation_limits: Vec<(usize, usize)> = top_level_groups
         .iter()
-        .map(|group| group.borrow().children().len())
-        .collect::<Vec<_>>();
+        .map(|group| {
+            // Initialize min and max
+            let mut min = 0;
+
+            // Determine group_name and min
+            if let Some(content) = group.borrow().content() {
+                let group_name = match content {
+                    NodeType::Group(group) => group.name().to_string(),
+                    NodeType::Layer(layer) => layer.name().to_string(),
+                };
+                if group_name.starts_with('*') {
+                    min = 1;
+                }
+            } else {
+                return (0, 1);
+            }
+
+            // Set max based on the number of children, adjusting for 1 index hex tokens
+            let max = group.borrow().children().len() + 1;
+
+            // Return the tuple
+            (min, max)
+        })
+        .collect();
+
+    token_validation_limits
+}
+
+fn generate_permutations(psd: &Psd) -> Vec<String> {
+    // Gather the limits for each top-level group
+    let limits = get_validation_limits(psd);
 
     // Generate all permutations within these limits
     let permutations = cartesian_product_with_limits(limits);
@@ -189,12 +225,12 @@ fn generate_permutations(top_level_groups: &Vec<Rc<RefCell<PsdNode>>>) -> Vec<St
 }
 
 // Helper function to generate Cartesian product with limits
-fn cartesian_product_with_limits(limits: Vec<usize>) -> Vec<Vec<usize>> {
+fn cartesian_product_with_limits(limits: Vec<(usize, usize)>) -> Vec<Vec<usize>> {
     let mut result = vec![vec![]];
     for &limit in &limits {
-        let mut temp = Vec::with_capacity(result.len() * limit);
+        let mut temp = Vec::with_capacity(result.len() * limit.1);
         for current in &result {
-            for i in 0..limit {
+            for i in limit.0..limit.1 {
                 let mut next = current.clone();
                 next.push(i);
                 temp.push(next);
@@ -287,7 +323,11 @@ fn collect_layer_ids_recursive(
     }
 }
 
-fn flatten_layers_and_output_png(layer_ids: Vec<(Option<String>, String)>, psd: &Psd) {
+fn flatten_layers_and_output_png(
+    layer_ids: Vec<(Option<String>, String)>,
+    psd: &Psd,
+    file_name: String,
+) {
     let all_groups = psd.groups();
     // Flattening logic needs to be adjusted to match the new layer ID structure
     let flattened_image = psd
@@ -316,5 +356,7 @@ fn flatten_layers_and_output_png(layer_ids: Vec<(Option<String>, String)>, psd: 
     let image_buffer =
         ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(psd.width(), psd.height(), flattened_image)
             .unwrap();
-    image_buffer.save("./test-output.png").unwrap();
+
+    let output_name = format!("./output/{:?}.png", file_name);
+    image_buffer.save(output_name).unwrap();
 }
